@@ -1,0 +1,143 @@
+---
+title: "分类 GSEA 的 GO BP 多分辨率功能模块（手动探索）"
+output: html_document
+---
+
+此 Notebook 不进入自动 Pipeline，代码块默认不执行。先选择分析粒度：`Group × Comparison × Direction` 或 `Group × Comparison`。每个选中分支各自计算 GO BP 语义相似度，再以 `1 − similarity` 为距离、complete linkage 建树，多个距离阈值在**该分支的同一棵树**上切割。模块编号只在当前分支和阈值内有意义，不宜跨分支直接对应。
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+## 1. 输入与聚类参数
+
+需要 GOSemSim、目标物种 OrgDb 和 pheatmap。`orgdb` 要与 GO TERM2GENE 的物种一致。语义分析可较慢且矩阵随 term 数平方增长；首次探索可把 `max_terms` 改为 200，最终结果建议 `Inf`。`max_plot_terms` 只影响热图展示，不改变已完成的全量聚类，图标题写出展示数量。
+
+热图的 `blue_white` 保持现有蓝白配色；也可选 `viridis`（需安装 viridisLite）。两种配色都使用固定的 0–1 GO 语义相似度色阶，不改变聚类结果。
+
+```{r inputs}
+find_project_root <- function(start = getwd()) {
+  candidates <- normalizePath(c(start, file.path(start, "..")), mustWork = FALSE)
+  found <- candidates[file.exists(file.path(candidates, "config.yml"))]
+  if (!length(found)) stop("请在项目根目录或 notebooks 目录运行，并准备 config.yml。")
+  found[[1]]
+}
+project_root <- find_project_root()
+config <- yaml::read_yaml(file.path(project_root, "config.yml"))
+# ggplot2_lib <- config$runtime$ggplot2_lib_loc
+# if (!is.null(ggplot2_lib) && nzchar(ggplot2_lib)) {
+#   desired <- normalizePath(file.path(ggplot2_lib, "ggplot2"), mustWork = TRUE)
+#   if ("ggplot2" %in% loadedNamespaces() &&
+#       normalizePath(getNamespaceInfo("ggplot2", "path")) != desired)
+#     stop("当前会话已加载其他 ggplot2；请重启 R 再运行。")
+#   library(ggplot2, lib.loc = ggplot2_lib)
+# } else library(ggplot2)
+source(file.path(project_root, "src/gsea_exploration/F.common.R"))
+source(file.path(project_root, "src/gsea_exploration/F.functional_modules.R"))
+gsea <- gsea_nb_read_classified(file.path(project_root,
+  "table/enrichment_results/gsea_sig_group.merged.classified.csv"))
+
+# 二选一：保留 Positive/Negative 各自聚类，或在同一 Comparison 内合并两方向。
+selection_mode <- "group_comparison_direction"
+# selection_mode <- "group_comparison"
+selected_groups <- NULL       # 例如 "CQ"；NULL = 全部
+selected_comparisons <- NULL  # 例如 c("R1_vs_R0", "R2_vs_R1")；NULL = 全部
+selected_directions <- NULL   # 仅第一种模式可用，例如 "Positive"；NULL = 全部
+selection <- gmc_selection_keys(gsea, mode = selection_mode,
+                                groups = selected_groups,
+                                comparisons = selected_comparisons,
+                                directions = selected_directions)
+selection[, c("Group", "Comparison", "Analysis_Direction")]
+
+orgdb <- "org.Hs.eg.db"
+ont <- "BP"
+method <- "Rel"                       # Resnik/Lin/Rel/Jiang/Wang
+distance_cuts <- c(0.9, 0.7, 0.5)  # 距离越低，模块通常越细
+max_terms <- Inf
+max_plot_terms <- 120
+heatmap_palette <- "blue_white"       # 或 "viridis"
+```
+
+## 2. 每个指定分支独立计算：同一相似度矩阵，多分辨率切割
+
+`group_comparison` 会把该比较的 Positive 和 Negative 通路放在同一个聚类池；若同一 GO ID 在两方向均出现，仅用 padj 最小的一行代表该 GO，但 `Source_Directions` 和 `n_directions` 会保留其来源。不会混入别的 Comparison。`group_comparison_direction` 则两个方向完全分开。
+
+```{r cluster}
+if (!requireNamespace("Rcpp", quietly = TRUE)) stop("请先安装 Rcpp 包。")
+semdata <- GOSemSim::godata(annoDb = orgdb, ont = ont, keytype = "ENTREZID")
+modules <- setNames(lapply(seq_len(nrow(selection)), function(i) {
+  branch <- selection[i, , drop = FALSE]
+  direction <- if (selection_mode == "group_comparison_direction")
+    branch$Analysis_Direction[[1]] else NULL
+  terms <- gmc_prepare_terms(gsea, group = branch$Group[[1]],
+                             comparison = branch$Comparison[[1]],
+                             direction = direction, max_terms = max_terms)
+  sem <- gmc_semantic_similarity(terms, orgdb = orgdb, ont = ont,
+                                 method = method, semdata = semdata)
+  result <- gmc_cluster_multi(sem$similarity, sem$terms,
+                               distance_cuts = distance_cuts, linkage = "complete")
+  result$omitted <- sem$omitted
+  result$n_missing_pairs_as_zero <- sem$n_missing_pairs_as_zero
+  result$semantic_settings <- sem$settings
+  result
+}), selection$key)
+lapply(modules, function(x) x$cluster_summary)
+lapply(modules, function(x) list(n_terms = nrow(x$similarity),
+                                 n_omitted = nrow(x$omitted),
+                                 n_missing_pairs_as_zero = x$n_missing_pairs_as_zero))
+```
+
+若 `n_omitted` 或 `n_missing_pairs_as_zero` 很高，请先检查 GO 版本、物种和注释包；缺失语义的 term 被明确列出，未定义的 pair 按相似度 0 处理，不应静默当作强相似。
+
+## 3. 热图与模块散点图
+
+热图按当前 cut 的模块分块排列；每个 GO ID 只在一个模块内。较大结果只展示各模块中按显著性排序后的前 `max_plot_terms` 个 term，图标题明确给出“展示/全部”计数。散点图是距离矩阵的 PCoA，仅用于辅助浏览，模块归属以表格和热图为准。
+
+```{r plots}
+branch_key <- selection$key[[1]]  # 也可查看 selection$key，指定其他分支
+distance_cut <- distance_cuts[[2]]
+heatmap <- gmc_plot_heatmap(modules[[branch_key]], distance_cut,
+                             max_plot_terms = max_plot_terms,
+                             palette = heatmap_palette)
+grid::grid.newpage(); grid::grid.draw(heatmap$gtable)
+if (nrow(modules[[branch_key]]$similarity) >= 2) {
+  scatter <- gmc_plot_scatter(modules[[branch_key]], distance_cut)
+  print(scatter)
+}
+```
+
+## 4. 确认后手动导出
+
+```{r save}
+for (i in seq_len(nrow(selection))) {
+  branch <- selection[i, , drop = FALSE]
+  result <- modules[[branch$key[[1]]]]
+  branch_parts <- c(selection_mode, gsea_nb_safe_name(branch$Group[[1]]),
+                    gsea_nb_safe_name(branch$Comparison[[1]]))
+  if (selection_mode == "group_comparison_direction")
+    branch_parts <- c(branch_parts, gsea_nb_safe_name(branch$Analysis_Direction[[1]]))
+  table_dir <- do.call(file.path, as.list(c(project_root, "table/gsea_functional_modules", branch_parts)))
+  figure_dir <- do.call(file.path, as.list(c(project_root, "figures/gsea_functional_modules", branch_parts)))
+  dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+  readr::write_tsv(result$assignments, file.path(table_dir, "go_module_assignments.tsv"))
+  readr::write_tsv(result$cluster_summary, file.path(table_dir, "go_module_summary.tsv"))
+  readr::write_tsv(result$omitted, file.path(table_dir, "go_terms_omitted.tsv"))
+  saveRDS(result$similarity, file.path(table_dir, "semantic_similarity.rds"))
+  saveRDS(result, file.path(table_dir, "functional_modules.rds"))
+  for (cut in distance_cuts) {
+    suffix <- paste0("distance_", gsub("\\.", "p", as.character(cut)))
+    hm <- gmc_plot_heatmap(result, cut, max_plot_terms = max_plot_terms,
+                           palette = heatmap_palette)
+    grDevices::pdf(file.path(figure_dir, paste0("similarity_heatmap_", suffix, ".pdf")),
+                   width = 13, height = max(7, min(28, length(attr(hm, "plotted_ids")) * 0.15 + 4)))
+    grid::grid.newpage(); grid::grid.draw(hm$gtable)
+    grDevices::dev.off()
+    if (nrow(result$similarity) >= 2) {
+      p <- gmc_plot_scatter(result, cut)
+      ggplot2::ggsave(file.path(figure_dir, paste0("module_scatter_", suffix, ".pdf")),
+                      p, width = 9, height = 7)
+    }
+  }
+}
+```

@@ -1,0 +1,80 @@
+---
+title: "GO BP 背景通路精简与核心基因保留（手动探索）"
+output: html_document
+---
+
+此 Notebook 不进入自动 Pipeline，代码块默认不执行。算法按 Group × Comparison × Direction 独立计算；非目标类别通路全部保留，目标类别通路按“每步新增 unique core genes 数”贪心加入，直到保留至少 75% 的 unique core genes。该规则不是全局最优最少通路求解，也不能单凭它证明发育通路的因果来源；输出用于观察富集冗余与基因覆盖变化。原始分类表绝不覆盖。
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+## 1. 输入和可调规则
+
+默认把 `Background == TRUE` 或 `Category == Other_Uncategorized` 视为目标项；当前分类表若写作 `Other/Uncategorized` 也自动等价匹配。不同规则之间为 OR，`target_pairs` 内每行则要求 Category 与 Category_Merged 同时匹配。
+
+```{r run}
+find_project_root <- function(start = getwd()) {
+  candidates <- normalizePath(c(start, file.path(start, "..")), mustWork = FALSE)
+  found <- candidates[file.exists(file.path(candidates, "config.yml"))]
+  if (!length(found)) stop("请在项目根目录或 notebooks 目录运行，并准备 config.yml。")
+  found[[1]]
+}
+project_root <- find_project_root()
+config <- yaml::read_yaml(file.path(project_root, "config.yml"))
+# ggplot2_lib <- config$runtime$ggplot2_lib_loc
+# if (!is.null(ggplot2_lib) && nzchar(ggplot2_lib)) {
+#   desired <- normalizePath(file.path(ggplot2_lib, "ggplot2"), mustWork = TRUE)
+#   if ("ggplot2" %in% loadedNamespaces() &&
+#       normalizePath(getNamespaceInfo("ggplot2", "path")) != desired)
+#     stop("当前会话已加载其他 ggplot2；请重启 R 再运行。")
+#   library(ggplot2, lib.loc = ggplot2_lib)
+# } else library(ggplot2)
+source(file.path(project_root, "src/gsea_exploration/F.common.R"))
+source(file.path(project_root, "src/gsea_exploration/F.pathway_pruning.R"))
+gsea <- gsea_nb_read_classified(file.path(project_root,
+  "table/enrichment_results/gsea_sig_group.merged.classified.csv"))
+
+target_categories <- c("Other_Uncategorized")
+target_merged_categories <- character()  # 如 c("Development")
+target_pairs <- NULL                      # 如 data.frame(Category="...", Category_Merged="...")
+pruned <- gpp_prune(gsea, min_coverage = 0.75,
+                    target_background = TRUE,
+                    target_categories = target_categories,
+                    target_merged_categories = target_merged_categories,
+                    target_pairs = target_pairs)
+pruned$summary
+table(pruned$annotated$.decision, useNA = "ifany")
+```
+
+## 2. 两种诊断图
+
+图一为每轮次/方向过滤前后的类别堆积数量；图二为 unique core genes 的保留百分比及 75% 参考线。`category_colors` 可以填与 GSVA 热图相同的具名颜色，名称需与所选类别列完全一致。
+
+```{r plots}
+group <- "CQ"
+category_column <- "Category_Merged"  # 也可改为 Category
+category_colors <- NULL                # 如 c("General Metabolism"="#003049", ...)
+comparison_order <- unique(as.character(gsea$Comparison))
+p_composition <- gpp_plot_composition(pruned, group, category_column,
+                                      category_colors, comparison_order)
+p_retention <- gpp_plot_gene_retention(pruned, group, comparison_order)
+print(p_composition)
+print(p_retention)
+```
+
+## 3. 确认后手动保存
+
+```{r save}
+table_dir <- file.path(project_root, "table/pathway_pruning")
+figure_dir <- file.path(project_root, "figures/pathway_pruning")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(pruned$annotated, file.path(table_dir, "gsea_pruning_decisions.tsv"))
+readr::write_tsv(pruned$filtered, file.path(table_dir, "gsea_pruned.tsv"))
+readr::write_tsv(pruned$summary, file.path(table_dir, "coverage_summary.tsv"))
+ggplot2::ggsave(file.path(figure_dir, paste0(gsea_nb_safe_name(group), "_composition.pdf")),
+                p_composition, width = 11, height = 5.5)
+ggplot2::ggsave(file.path(figure_dir, paste0(gsea_nb_safe_name(group), "_gene_retention.pdf")),
+                p_retention, width = 9, height = 5.5)
+```

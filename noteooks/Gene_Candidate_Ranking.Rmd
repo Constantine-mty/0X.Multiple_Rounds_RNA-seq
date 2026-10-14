@@ -1,0 +1,95 @@
+---
+title: "分类 GSEA 核心基因挖掘与排序（手动探索）"
+output: html_document
+---
+
+此 Notebook 不进入自动 Pipeline，代码块默认不执行。一次选择一个 Group × Comparison × Category × Direction；通路频率仅在这一组显著通路内计算。`Comparison` 通过 contrasts.tsv 的 numerator/denominator 匹配 metadata 的 Cycle，因此不依赖 R0/R1 命名。
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+## 1. 加载输入并选择分析分支
+
+```{r inputs}
+find_project_root <- function(start = getwd()) {
+  candidates <- normalizePath(c(start, file.path(start, "..")), mustWork = FALSE)
+  found <- candidates[file.exists(file.path(candidates, "config.yml"))]
+  if (!length(found)) stop("请在项目根目录或 notebooks 目录运行，并准备 config.yml。")
+  found[[1]]
+}
+project_root <- find_project_root()
+config <- yaml::read_yaml(file.path(project_root, "config.yml"))
+source(file.path(project_root, "src/gsea_exploration/F.common.R"))
+source(file.path(project_root, "src/gsea_exploration/F.gene_candidates.R"))
+
+classified_path <- file.path(project_root, "table/enrichment_results/gsea_sig_group.merged.classified.csv")
+gsea <- gsea_nb_read_classified(classified_path)
+metadata <- readr::read_tsv(file.path(project_root, config$input$metadata_file), show_col_types = FALSE)
+contrasts <- readr::read_tsv(file.path(project_root, config$input$contrasts_file), show_col_types = FALSE)
+tpm <- gsea_nb_read_matrix(file.path(project_root, config$gsva$tpm_file), config$input$gene_column)
+```
+
+```{r}
+category_column <- "Category"  # 可改为 Category、Theme 等已有列
+sort(unique(as.character(gsea[[category_column]])))
+```
+
+```{r}
+group <- "CQ"
+comparison <- "R2_vs_R1"
+category <- "DNA Replication"       # 可给多个名称：c("...", "...")
+direction <- "Negative"                # Positive/Negative 或 Up/Down
+```
+
+## 2. 提取核心基因并关联 DESeq2 / TPM
+
+`core_enrichment` 中的每条基因–通路关联只计一次。默认差异结果路径遵循 Pipeline 的目录规则；若项目另有路径，只修改 `de_path`。
+
+```{r metrics}
+extracted <- gm_extract_core(gsea, group, comparison, category, direction, category_column)
+de_path <- file.path(project_root, "data/de_results", group, comparison, "deseq2_results.tsv")
+de <- readr::read_tsv(de_path, show_col_types = FALSE)
+metrics <- gm_add_metrics(
+  extracted, de, tpm, metadata, contrasts,
+  gene_column = config$input$gene_column,
+  sample_column = config$input$sample_column,
+  group_column = config$input$group_column,
+  cycle_column = config$input$cycle_column
+)
+head(extracted$pathways[, c("ID", "Description", category_column, "core_enrichment")])
+head(metrics)
+```
+
+## 3. 过滤并直接排序
+
+规则只有三步：先要求 DESeq2 的 log2FC 方向与 GSEA 一致；再删除表达量低于 `min_mean_tpm` 的基因；最后排序。默认表达量是“较高表达轮次”的平均 TPM（Positive 用 numerator，Negative 用 denominator）。输出表只包含通过前两步的基因，不计算综合分数。
+
+`rank_by = "frequency"` 默认按进入多少条所选显著通路的核心基因列表降序排列；也可改成 `"log2fc"`，按 `|log2FC|` 降序排列，即上调越大、下调越负越靠前。主指标相同时，依次用另一个指标、表达量、基因名打破并列。`padj` 仍保留在结果里供人工核查，但不参与此规则。
+
+```{r rank}
+ranked <- gm_rank_candidates(
+  metrics,
+  min_mean_tpm = 1,
+  rank_by = "frequency",                       # 或 "log2fc"
+  expression_metric = "high_condition_mean_tpm" # 如需两轮次平均值，可改为 "pair_mean_tpm"
+)
+cat("候选基因：", nrow(metrics), "；通过方向和表达阈值：", nrow(ranked), "\n")
+head(ranked[, c("rank", "Gene", "n_core_pathways", "core_pathway_fraction",
+                 "high_condition_mean_tpm", "log2FoldChange", "padj")], 30)
+```
+
+输出同时保留原始 TPM、log2FC、padj 和通路 ID；最终实验候选仍应人工核查引物可设计性、抗体/蛋白表达等。
+
+## 4. 确认后手动保存
+
+```{r save}
+out_dir <- file.path(project_root, "table/gene_candidates", gsea_nb_safe_name(group),
+                     gsea_nb_safe_name(comparison))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+stem <- paste(gsea_nb_safe_name(paste(category, collapse = "_")),
+              gsea_nb_safe_name(direction), sep = "__")
+readr::write_tsv(ranked, file.path(out_dir, paste0(stem, "_ranked.tsv")))
+readr::write_tsv(extracted$core_links, file.path(out_dir, paste0(stem, "_core_links.tsv")))
+readr::write_tsv(extracted$pathways, file.path(out_dir, paste0(stem, "_pathways.tsv")))
+```
