@@ -1,0 +1,154 @@
+---
+title: "RNA-seq Quality Control（手动检查）"
+output: html_document
+---
+
+本 Notebook **不属于自动 Pipeline**。所有分析代码块默认 `eval=FALSE`：请逐块运行、调整过滤阈值和画布尺寸，确认后再运行保存代码块。`total_counts` 始终来自原始 counts，不能用 TPM/FPKM 的列和替代测序深度。
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+## 1. 输入与样本选择
+
+```{r input}
+find_project_root <- function(start = getwd()) {
+  candidates <- normalizePath(c(start, file.path(start, "..")), mustWork = FALSE)
+  found <- candidates[file.exists(file.path(candidates, "config.yml")) |
+                      file.exists(file.path(candidates, "config.example.yml"))]
+  if (!length(found)) stop("请在项目根目录或 notebooks 目录运行。")
+  found[[1]]
+}
+project_root <- find_project_root()
+config_file <- file.path(project_root, "config.yml")
+if (!file.exists(config_file)) stop("请先创建 config.yml。")
+config <- yaml::read_yaml(config_file)
+
+# 如果服务器存在冲突的 ggplot2 版本，务必在其他绘图包加载之前执行此块。
+# ggplot2_lib <- config$runtime$ggplot2_lib_loc
+# if (!is.null(ggplot2_lib) && nzchar(ggplot2_lib)) {
+#   desired <- normalizePath(file.path(ggplot2_lib, "ggplot2"), mustWork = TRUE)
+#   if ("ggplot2" %in% loadedNamespaces() &&
+#       normalizePath(getNamespaceInfo("ggplot2", "path")) != desired) {
+#     stop("当前 R 会话已加载其他 ggplot2；请重启 R 再运行此 Notebook。")
+#   }
+#   library(ggplot2, lib.loc = ggplot2_lib)
+# } else {
+#   library(ggplot2)
+# }
+source(file.path(project_root, "src/qc/F.quality_control.R"))
+
+input <- config$input
+metadata <- readr::read_tsv(file.path(project_root, input$metadata_file), show_col_types = FALSE)
+counts <- qc_read_matrix(file.path(project_root, input$counts_file), gene_column = input$gene_column)
+tpm_file <- file.path(project_root, config$gsva$tpm_file)
+tpm <- if (file.exists(tpm_file)) qc_read_matrix(tpm_file, input$gene_column) else NULL
+# 项目没有 FPKM 时保持 NULL。
+fpkm <- NULL
+
+# 可设为 c("CQ", "N396") 等；NULL 为 metadata 中全部 Group/Cycle。
+selected_groups <- NULL
+selected_cycles <- NULL
+qc <- qc_prepare_data(
+  counts, metadata, tpm = tpm, fpkm = fpkm,
+  groups = selected_groups, cycles = selected_cycles,
+  sample_column = input$sample_column,
+  group_column = input$group_column,
+  cycle_column = input$cycle_column
+)
+table(qc$metadata[[input$group_column]], qc$metadata[[input$cycle_column]])
+```
+
+## 2. 基础 QC 表及图
+
+MT 与核糖体基因使用基因符号匹配；如果 Gene 是 Ensembl ID，请先改 `mitochondrial_pattern` / `ribosomal_pattern`，或转换为基因符号。
+
+```{r basic-qc}
+metrics <- qc_calculate_metrics(
+  qc,
+  tpm_thresholds = c(0.1, 1),
+  mitochondrial_pattern = "^MT-",
+  ribosomal_pattern = "^(RPL|RPS)"
+)
+print(metrics)
+
+# 在这里指定项目颜色：名称对应 metadata 的 Group / Cycle；其他名称自动补色。
+custom_group_colors <- c(CQ = "#4C78A8", N396 = "#F28E2B")
+custom_cycle_colors <- c(R0 = "#A8DADC", R1 = "#457B9D", R2 = "#F4A261", R3 = "#E76F51")
+resolve_colors <- function(levels, custom, palette = "Dark 3") {
+  colors <- setNames(grDevices::hcl.colors(length(levels), palette), levels)
+  if (length(custom)) {
+    if (is.null(names(custom)) || anyNA(names(custom)) || any(!nzchar(names(custom))) ||
+        anyDuplicated(names(custom))) stop("自定义颜色必须有唯一的 Group/Cycle 名称。")
+    unused <- setdiff(names(custom), levels)
+    if (length(unused)) warning("这些颜色名称不在当前数据中，将忽略：", paste(unused, collapse = ", "))
+    used <- intersect(levels, names(custom))
+    colors[used] <- custom[used]
+    tryCatch(grDevices::col2rgb(colors), error = function(e) stop("颜色值无效：", conditionMessage(e)))
+  }
+  colors
+}
+group_colors <- resolve_colors(qc$group_order, custom_group_colors)
+cycle_colors <- resolve_colors(qc$cycle_order, custom_cycle_colors, palette = "Set 2")
+
+p_library <- qc_plot_metric(metrics, "total_counts", qc, group_colors, cycle_colors)
+p_detected <- qc_plot_metric(metrics, "detected_genes_count_gt0", qc, group_colors, cycle_colors)
+p_tpm <- if (!is.null(qc$tpm)) qc_plot_metric(metrics, "detected_genes_tpm_gt1", qc, group_colors, cycle_colors) else NULL
+p_mt <- qc_plot_metric(metrics, "mitochondrial_pct", qc, group_colors, cycle_colors)
+p_ribo <- qc_plot_metric(metrics, "ribosomal_pct", qc, group_colors, cycle_colors)
+p_library
+p_detected
+p_tpm
+p_mt
+p_ribo
+```
+
+## 3. VST、PCA 与样本相关性
+
+默认使用 DESeq2 的 blind VST。仅在需要快速预览或暂未安装 DESeq2 时，可改成 `method = "log_cpm"`；两种变换的 PCA/相关性不应混为同一结果。
+
+```{r pca-correlation}
+transformed <- qc_transform_counts(qc, method = "vst", min_count = 10, min_samples = 3)
+p_pca <- qc_plot_pca(transformed, qc, group_colors = group_colors,
+                     label_samples = TRUE, top_genes = NULL)
+p_pca
+
+heatmap <- qc_plot_correlation(
+  transformed, qc, cluster_samples = TRUE,
+  annotation_colors = list(Group = group_colors, Cycle = cycle_colors)
+)
+grid::grid.newpage()
+grid::grid.draw(heatmap$gtable)
+```
+
+## 4. Housekeeping 表达
+
+此项需要 TPM。基因符号可直接修改，缺失基因会给出警告；`mean` / `median` 是每个样本对可用 housekeeping 基因的汇总。
+
+```{r housekeeping}
+housekeeping_genes <- c("ACTB", "GAPDH", "B2M", "RPLP0", "HPRT1", "TBP",
+                        "PPIA", "PGK1", "YWHAZ", "SDHA", "RPL13A", "TUBB")
+p_housekeeping <- qc_plot_housekeeping(qc, housekeeping_genes, summary = "per_gene", group_colors = group_colors)
+p_housekeeping_mean <- qc_plot_housekeeping(qc, housekeeping_genes, summary = "mean", group_colors = group_colors)
+p_housekeeping
+p_housekeeping_mean
+```
+
+## 5. 确认后保存
+
+这里的尺寸和文件名仅为示例，请先观察图形再运行本块。相关性热图返回 pheatmap 对象，保存其 `gtable`。
+
+```{r save-qc}
+output_dir <- file.path(project_root, "figures", "qc")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(metrics, file.path(output_dir, "sample_qc_metrics.tsv"))
+ggplot2::ggsave(file.path(output_dir, "library_size.pdf"), p_library, width = 9, height = 5)
+ggplot2::ggsave(file.path(output_dir, "detected_genes.pdf"), p_detected, width = 9, height = 5)
+if (!is.null(p_tpm)) ggplot2::ggsave(file.path(output_dir, "detected_genes_tpm.pdf"), p_tpm, width = 9, height = 5)
+ggplot2::ggsave(file.path(output_dir, "mitochondrial_pct.pdf"), p_mt, width = 9, height = 5)
+ggplot2::ggsave(file.path(output_dir, "ribosomal_pct.pdf"), p_ribo, width = 9, height = 5)
+ggplot2::ggsave(file.path(output_dir, "pca.pdf"), p_pca, width = 7, height = 6)
+ggplot2::ggsave(file.path(output_dir, "sample_correlation.pdf"), heatmap$gtable, width = 9, height = 8)
+ggplot2::ggsave(file.path(output_dir, "housekeeping.pdf"), p_housekeeping, width = 12, height = 8)
+ggplot2::ggsave(file.path(output_dir, "housekeeping_mean.pdf"), p_housekeeping_mean, width = 8, height = 5)
+```

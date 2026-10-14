@@ -1,0 +1,175 @@
+# 加载Pipeline结果的代码
+
+```{r}
+
+# Notice: Rmd 不能改变计算目录
+source("/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/scripts/F.load_pipeline_output_files.R")
+
+comparison.df <- readr::read_tsv(
+  "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/contrasts.tsv",
+  show_col_types = FALSE
+)
+
+trend.df <- readr::read_tsv(
+  "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/trend_sets.tsv",
+  show_col_types = FALSE
+)
+```
+
+## 1. DESeq2 results
+
+```{r}
+
+# DESeq2 results list
+
+deseq2.list <- read_deseq2_results(
+  comparison.df = comparison.df,
+  result_dir = "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/de_results/"
+)
+
+class(deseq2.list)
+str(deseq2.list, max.level = 2)
+head(deseq2.list$CQ$R1_vs_R0)
+```
+
+## 2. Trend results
+
+```{r}
+
+# Trend Summary list
+
+trend.summary.list <- read_trend_results(
+  trend.df = trend.df,
+  result_dir = "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/trend_results/",
+  filename = "trend_summary.tsv"
+)
+
+str(trend.summary.list, max.level = 2)
+head(trend.summary.list$CQ$adjacent)
+```
+
+```{r}
+
+# Trend results list
+
+trend.list <- read_trend_results(
+  trend.df = trend.df,
+  result_dir = "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/trend_results/",
+  filename = "trend_table.tsv"
+)
+
+str(trend.list, max.level = 2)
+head(trend.list$CQ$adjacent)
+```
+
+## 3. Enrichment results
+
+```{r}
+
+# Enrichment significant results list
+
+enrichment <- read_enrichment_results(
+  comparison_df = comparison.df,
+  enrichment_dir = "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/enrichment_results"
+)
+
+# enrichment object 同时读取了dataframe以及dataframe构成的 list object
+
+str(enrichment, max.level = 3)
+table(enrichment$gsea$df$Group, enrichment$gsea$df$Comparison)
+
+
+```
+
+```{r}
+# 3.1 check gsea subset
+str(enrichment$gsea$list, max.level = 2)
+class(enrichment$gsea$list$CQ$R1_vs_R0) # 保留显著结果的dataframe，而不是原始raw object
+gsea.df <- enrichment$gsea$df
+head(gsea.df)
+table(gsea.df$Comparison, gsea.df$Direction, gsea.df$Group)
+```
+
+```{r}
+# 3.2 check ora subset
+str(enrichment$ora$list, max.level = 3)
+class(enrichment$ora$list$CQ$Up_Down$R1_vs_R0) # 保留显著结果的dataframe，而不是原始raw object
+ora.df <- enrichment$ora$df
+head(ora.df)
+table(ora.df$Group, ora.df$Comparison, ora.df$Sets)
+```
+
+## 4. GSVA results
+
+### 4.1 GSVA score object
+
+```{r}
+# GSVA object
+
+# all sample score
+gsva.res <- readRDS("/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/gsva/gsva_scores.rds")
+
+# single group sample score
+gsva.cq.res <- readRDS("/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/gsva/by_group/CQ/gsva_scores.rds")
+gsva.n396.res <- readRDS("/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/gsva/by_group/N396/gsva_scores.rds")
+```
+
+### 4.2 GSVA limma contrast
+
+```{r}
+## GSVA limma contrast list
+
+gsva.limma.list <- read_gsva.limma_results(
+  comparison.df = comparison.df,
+  result_dir = "/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/gsva_results/by_group/"
+)
+
+str(gsva.limma.list, max.level = 2)
+table(gsva.limma.list$CQ$R1_vs_R0$Direction)
+```
+
+### 4.3 GSVA one Round vs others specific
+
+```{r}
+## Single Cycle Specific(备用) 
+# 检验情况，同样有1:根据总样本打分结果提取对应子集进行统计检验；2：根据单组样本进行打分，然后用单组结果进行统计检验（一般来说，用单组的结果更好反映Group内的变化情况）
+
+specific.cq.res <- readRDS("/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/gsva_results/by_group/CQ/specific_limma_fit.rds")
+specific.n396.res <- readRDS("/media/desk16/MaTianyu/Project/0X.Multiple_Rounds_RNA-seq/data/gsva_results/by_group/N396/specific_limma_fit.rds")
+
+str(specific.cq.res, max.level = 1)
+head(specific.cq.res$result)
+table(specific.cq.res$result$Direction, specific.cq.res$result$Peak_Cycle)
+```
+
+```{r}
+
+```
+
+```{r}
+# 注意：setwd必须在项目根路径下
+source("src/F.gene_expression_trend.R")
+
+p <- plot_gene_expression_trend(
+  gene = "AKT3", project_dir = ".",
+  groups = c("CQ", "N396"),
+  group_colors = c(CQ = "#005596", N396 = "#CA6E28"),
+  group_shapes = c(CQ = 16, N396 = 17), show_legend = TRUE,
+  line_type = "curve", annotation = "tpm_fc"
+)
+
+p_de <- plot_gene_expression_trend(
+  "AKT3", project_dir = ".", line_type = "straight",
+  annotation = "deseq2_log2fc", significant_rule = "padj"
+)
+
+p_grid <- plot_gene_expression_trend_grid(
+  genes = c("AKT3", "DNA2", "ENDOG"), project_dir = ".",
+  ncol = 2, groups = c("CQ", "N396"),
+  group_colors = c(CQ = "#005596", N396 = "#CA6E28"),
+  group_shapes = c(CQ = 16, N396 = 17), show_legend = FALSE,
+  line_type = "straight", annotation = "tpm_fc",
+  sort = "descending"
+)
+
+```

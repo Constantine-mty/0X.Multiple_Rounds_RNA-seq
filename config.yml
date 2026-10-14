@@ -1,0 +1,394 @@
+# 复制为 config.yml 后修改。所有相对路径均相对于本配置文件所在项目目录。
+project_root: "."
+
+# 有多个 ggplot2 版本时，可在此固定用于整个流程的版本。
+# 服务器示例："/opt/R/4.4.1/lib/R/library"；留为 null 时沿用 R 默认 .libPaths()。
+runtime:
+  ggplot2_lib_loc: "/opt/R/4.4.1/lib/R/library"
+
+input:
+  counts_file: "data/counts.tsv"
+  metadata_file: "data/metadata.tsv"
+  contrasts_file: "data/contrasts.tsv"
+  trend_sets_file: "data/trend_sets.tsv"
+  gene_column: "Gene"
+  sample_column: "Sample"
+  group_column: "Group"
+  cycle_column: "Cycle"
+
+deseq2:
+  # 在每一个组内分别拟合：~ Batch + Cycle；没有协变量时使用 []。
+  design_covariates: [] # ["Batch"]
+  min_count: 10
+  min_samples: 3
+  min_group_samples: 2
+  alpha: 0.05
+
+trend:
+  enabled: true
+  fc_cutoff: 2
+  padj_cutoff: 0.05
+  # 某基因没有出现在某一比较结果时，是否按 Stable 处理。
+  missing_as_stable: true
+
+enrichment:
+  enabled: true
+  # 所有 ORA/GSEA 均使用这两份项目内的、预先冻结的 GO-BP 定义。
+  # 第一列/第二列必须分别命名为 term、gene；TERM2NAME 为 term、name。
+  term2gene_file: "data/GO_BP_TERM2GENE.tsv"
+  term2name_file: "data/GO_BP_TERM2NAME.tsv"
+  p_adjust_method: "BH"
+  pvalue_cutoff: 0.05
+  qvalue_cutoff: 0.2
+  min_gs_size: 10
+  max_gs_size: 300
+  rank_column: "stat"           # 建议 stat；也可改为 log2FoldChange
+
+gsva:
+  enabled: true
+  # 保留全样本统一打分，同时为每个 Group 仅用其自身样本重新打分。
+  run_groupwise_scoring: true
+  # TPM 与 count 矩阵使用同一 Gene ID 和样本列名；评分使用 log2(TPM + 1)。
+  tpm_file: "data/tpm.tsv"
+  log_pseudocount: 1
+  count_filter_min: 10
+  count_filter_min_samples: 3
+  kcdf: "Gaussian"
+  # 与 enrichment 使用同一 TERM2GENE，但 GSVA 的通路大小范围可单独设置。
+  min_gs_size: 10
+  max_gs_size: 300
+  # 需要校正批次等变量时填写 metadata 列名；无需校正则设为 []。
+  design_covariates: []
+  min_group_samples: 2
+  p_adjust_method: "BH"
+  padj_cutoff: 0.05
+  logfc_cutoff: 0
+  # 对每一个组进行“某轮次 vs 其余轮次均值”的特异性检验。
+  run_specific_tests: true
+  
+
+
+# GSEA 分类后的 GSVA 时间趋势统计。时间点直接以 metadata 中 Cycle 列为准，
+# 不再从样本名（如 _R1_）中解析。cycle_order 留空时沿 metadata 的首次出现顺序；
+# 建议在需要固定时序时显式填写，例如 ["R0", "R1", "R2", "R3"]。
+gobp_temporal_trend:
+  cycle_order: []
+  zscore: false
+  thresholds:
+    mode: "manual"
+    epsilon_pathway: 0.10
+    epsilon_category: 0.07
+    amplitude_cutoff: 0.25
+    dcs_cutoff: 0.60
+
+
+
+
+# 在完成 notebooks/Mapping_GOBP_Category.Rmd 与 src/05_run_summary_gsea.sh 后运行：
+# Rscript scripts/run_gobp_gsva_plots.R --config config.yml
+# 分类表用于“每个类别的全部通路”图；汇总工作簿用于代表通路总图。
+gobp_gsva_plots:
+  enabled: true
+  classified_gsea_file: "table/enrichment_results/gsea_sig_group.merged.classified.csv"
+  summary_workbook: "table/enrichment_results/gsea_sig_group.merged.summary.xlsx"
+  gsva_by_group_dir: "data/gsva/by_group"
+  output_dir: "figures/gobp_gsva"
+  # 项目内分组 GSVA 图使用的类别列；默认与代表通路汇总的 Category_Merged 保持一致。
+  category_column: "Category"
+  representative_category_column: "Category_Merged"
+  summary_category_column: "English Category"
+  summary_pathway_column: "代表通路"
+  groups: []
+  # [] 表示按 metadata 中 Cycle 的首次出现顺序。可写为 ["R0", "R1", "R2", "R3"]。
+  cycle_order: []
+  # [] 表示先使用下面列出的顺序，再附加本项目中其他类别；决定代表通路总图的上下顺序。
+  category_order: []
+  # 可只覆盖需要固定的类别颜色；未列出的类别将自动补色。
+  # category_colors:
+  #   "Mitochondrial Function & OXPHOS": "#8FAF58"
+  #   "DNA Replication, Repair & Genome Stability": "#C95F59"
+  category_colors: {}
+  # cycle_colors:
+  #   "R0": "#D9ED92"
+  #   "R1": "#B2DF8A"
+  cycle_colors: {}
+  # 当 Group 名与 Excel sheet 名不同时，在这里显式对应。
+  summary_sheet_by_group: {}
+  heatmap:
+    palette: ["#2166AC", "#67A9CF", "#F7F7F7", "#EF8A62", "#B2182B"]
+    symmetric: true
+    cluster_rows: true
+    cellwidth: 16
+    cellheight: 10
+    # 仅为代表通路总热图增加外围画布宽度（英寸）；不改变每个 cell 的尺寸。
+    representative_extra_width: 4
+  line_plot:
+    show_sample_points: true
+    # 类别内全部通路折线图始终不显示 pathway legend，避免文字长度改变面板比例。
+    category_width: 5
+    category_height: 4
+    # 代表通路图按 Category 纵向拼接；颜色和顺序与代表通路总热图一致。
+    representative_width: 2
+    representative_panel_height: 1.35
+    # 可对个别 Group 固定纵轴；未填写时，对同一 Group 的所有类别图自动使用同一范围。
+    # y_limits:
+    #   CQ: [-0.8, 0.8]
+    y_limits: {}
+
+
+
+# 在 DE、趋势统计和 GSEA 全部完成后运行：
+# Rscript scripts/run_result_plots.R --config config.yml
+# 三类图仅读取已有结果，因此调整样式或阈值后可直接重跑本脚本。
+result_plots:
+  enabled: true
+  output_dir: "figures/result_plots"
+  # 设为 null 时与 trend.fc_cutoff / trend.padj_cutoff 相同，也就是 ORA 使用的 DE 阈值。
+  # 同一套阈值同时用于火山图和 DEG 数量柱状图。
+  fc_cutoff: null
+  padj_cutoff: null
+  # 通过 [row, column] 显式定义 comparison 在总图中的位置。空位会保留，
+  # 因此可表达任意轮次结构；例如这里是 R0-R3 的上三角布局。
+  comparison_layout:
+    nrow: 3
+    ncol: 3
+    positions:
+      "R1_vs_R0": [1, 1]
+      "R2_vs_R0": [1, 2]
+      "R3_vs_R0": [1, 3]
+      "R2_vs_R1": [2, 2]
+      "R3_vs_R1": [2, 3]
+      "R3_vs_R2": [3, 3]
+  # 某个 Group 的 comparison 结构不同，可在此完整覆盖其布局：
+  # comparison_layout_by_group:
+  #   CQ:
+  #     nrow: 2
+  #     ncol: 2
+  #     positions:
+  #       "R1_vs_R0": [1, 1]
+  #       "R2_vs_R0": [1, 2]
+  #       "R2_vs_R1": [2, 2]
+  comparison_layout_by_group: {}
+  
+  save:
+    # 每种图默认同时导出 PDF 和 PNG；只需一种格式时可改为 ["pdf"] 或 ["png"]。
+    formats: ["pdf", "png"]
+    dpi: 300
+    volcano_individual: {width: 5, height: 4}
+    volcano_combined: {width: 12, height: 12}
+    trend_bar: {width: 9, height: 6}
+    deg_gsea_count_combined: {width: 8, height: 10}
+  
+  volcano:
+    # within_group：同一 Group 的全部 comparison 共享对称 X/Y 坐标；
+    # global：所有 Group 的全部 comparison 使用完全相同的坐标。
+    axis_scope: "within_group"
+    # 可手动指定坐标范围；x_limits 即使写成非对称范围也会自动转为对称。
+    # x_limits: [-6, 6]
+    # y_limits: [0, 30]
+    point_size: 0.8
+    point_alpha: 0.7
+    colors:
+      up: "#D73027"
+      down: "#4575B4"
+      not_significant: "grey70"
+    show_individual_legend: true
+    # 单个比较需要手动放置 Up/Down 数字时，使用实际坐标 [x, y]：
+    # label_positions:
+    #   CQ:
+    #     "R3_vs_R0":
+    #       up: [4.5, 25]
+    #       down: [-4.5, 25]
+    label_positions: {}
+  
+  trend_bar:
+    enabled: true
+    # [] 表示绘制所有 trend_id；例如只绘制相邻比较趋势可写 ["adjacent"]。
+    trend_ids: []
+    group_colors: {
+        CQ: "#003049", 
+        N396: "#c1121f"
+      }
+    show_count: true
+    # y_breaks:
+    #   CQ:
+    #     adjacent: [1500, 10000]
+    # 使用 y_breaks 时需要安装 ggbreak 包。
+    y_breaks: 
+        CQ:
+          adjacent: [1500, 10000]
+        N396:
+          adjacent: [1500, 10000]
+    y_break_scales: 0.35 # scales = 0.35 表示：上半段相对于下半段采用 0.35 倍的显示尺度。    上半段太高：减小 break_scales
+    # 最高柱数字的额外顶部留白比例；断轴图也会保留该空间，避免数字被截断。
+    label_top_padding: 0.10
+  
+  deg_gsea_count:
+    # 原始 gsea_go_bp.rds 会按此阈值重新筛选；null 表示使用 enrichment.pvalue_cutoff。
+    gsea_p_adjust_cutoff: null
+    # 若需要同时要求 qvalue，可填写数值；null 表示不额外筛选 qvalue。
+    gsea_qvalue_cutoff: null
+    colors:
+      deg_up: "#C1121F"
+      deg_down: "#669BBC"
+      gsea_positive: "#8E6CBE"
+      gsea_negative: "#56A3A6"
+  
+  # 富集结果的逐 comparison 图。所有 GSEA/ORA 图优先读取原始 RDS，
+  # 因此可以仅修改此处阈值和样式后重画，而无需重新富集。
+  enrichment:
+    enabled: true
+    
+    gsea_bar:
+      enabled: true
+      # 每个方向各取前 N 条通路；例如 [10, 20, 50] 将每个 comparison 输出三张图。
+      top_n: [10, 20, 50, "all"]
+      term_column: "Description"
+      # null 表示沿用 deg_gsea_count.gsea_p_adjust_cutoff（最终默认 enrichment.pvalue_cutoff）。
+      p_adjust_cutoff: null
+      qvalue_cutoff: null
+      colors:
+        negative: "#3B75AF"
+        positive: "#D95F5F"
+      # width/height 单独解析：{width: 4, height: null} 表示宽度固定为 4、高度保持自动。
+      # 也可按输出变体单独覆盖，键名为 top_10、top_20、top_50、all：
+      # by_plot:
+      #   top_10: {width: 4, height: null}
+      #   top_20: {width: 4.5, height: null}
+      #   top_50: {width: 5.5, height: null}
+      #   all: {width: 7, height: null}
+      # save: {width: null, height: null}
+      save:
+        width: null
+        height: null
+        by_plot:
+          top_10: {width: 8, height: null}
+          top_20: {width: 8, height: null}
+          top_50: {width: 12, height: null}
+          all: {width: 12, height: null}
+    
+    ora_dot:
+      enabled: true
+      # 可选 up、down、up_down；每个 comparison 的每一种集合各输出一张 Top N 图。
+      sets: ["up", "down", "up_down"]
+      top_n: [10, 20, 50, "all"]
+      p_adjust_cutoff: null
+      qvalue_cutoff: null
+      # 可选 blue、red、green、purple、orange、teal、grey、pink。
+      palette: "red"
+      color_by: "log10_padjust" # 可选 log10_padjust 或 padjust。
+      point_size_range: [3, 10]
+      point_alpha: 0.85
+      legend_position: "right"
+      legend_direction: "vertical"
+      # 支持与 gsea_bar 相同的 width/height 和 by_plot（top_10、all）写法。
+      save: {width: null, height: null}
+    # 此处读取分类脚本生成的 gsea_sig_group.merged.classified.csv。
+    classified_gsea:
+      enabled: true
+      file: "table/enrichment_results/gsea_sig_group.merged.classified.csv"
+      # 统计和排序所用类别列；可以换成 Category、Category_CN 等。
+      category_column: "Category_Merged"
+      description_column: "Description"
+      
+      count_bar:
+        colors:
+          negative: "#3B75AF"
+          positive: "#D95F5F"
+        save: {width: null, height: null}
+      
+      representative_bubble:
+        # 每个 Category 选取 qvalue/p.adjust 最小的前 N 条通路。
+        top_n_per_category: 1
+        viridis_option: "D"
+        point_alpha: 0.85
+        label_size: 3
+        legend_position: "right"
+        # save: {width: null, height: null}
+        save:
+        width: null
+        height: null
+        by_plot:
+          top_10: {width: 8, height: null}
+          top_20: {width: 8, height: null}
+          top_50: {width: 12, height: null}
+          all: {width: 12, height: null}
+      
+      # 基于已分类的显著 GSEA 结果，按 trend_sets.tsv 的 adjacent/ref0 等比较序列
+      # 绘制类别组成变化，而非追踪单个通路的显著性状态。
+      category_sankey:
+        enabled: true
+        # [] 表示 trend_sets.tsv 的所有 Group / trend_id；也可限定，例如 ["adjacent", "ref0"]。
+        groups: []
+        trend_ids: []
+        # 可选 count、proportion；会分别输出通路数量和组成比例版本。
+        modes: ["count", "proportion"]
+        # 默认继承 gobp_gsva_plots 的 category_order / category_colors，以保证与 GSVA 图一致。
+        # 如需仅在此处覆盖，可填写类别顺序或“类别: 颜色”的命名映射。
+        category_order: []
+        category_colors: {}
+        stratum_width: 0.48
+        flow_alpha: 0.78
+        legend_position: "right"
+        # count/proportion 可分别设宽高；null 则保留自动尺寸。
+        # save:
+        #   width: null
+        #   height: null
+        #   by_plot:
+        #     count: {width: 9, height: null}
+        #     proportion: {width: 9, height: null}
+        save: {width: null, height: null}
+
+# 必须在完成 GSEA 分类（gsea_sig_group.merged.classified.csv）后运行：
+# Rscript scripts/run_post_category_trends.R --config config.yml
+# 它不会重新计算 DE/GSEA，而是基于已有的基因 trend_table 与分类后 GSEA 结果，
+# 导出每种趋势的表格、每组/趋势一个 xlsx，并绘制总桑基图与逐子趋势高亮桑基图。
+post_category_trends:
+  enabled: true
+  classified_gsea_file: "table/enrichment_results/gsea_sig_group.merged.classified.csv"
+  gsea_output_dir: "data/gsea_trend_results"
+  table_output_dir: "table/trend_feature_subsets"
+  figure_output_dir: "figures/trend_sankey"
+  # [] 代表 trend_sets.tsv 中的全部 Group / trend_id；也可只指定部分。
+  groups: []
+  trend_ids: []
+  gsea_columns:
+    id: "ID"
+    description: "Description"
+    direction: "Direction"
+    annotation_columns: ["Category", "Category_Merged"]
+  export:
+    write_individual_tsv: true
+    write_xlsx: true
+    include_summary_sheet: true
+  sankey:
+    enabled: true
+    # 先后输出“带 strata 标签”和“无 strata 标签”的两个版本。
+    variants: ["with_labels", "without_labels"]
+    # 每种非全稳定趋势都输出一张仅高亮该簇 flow 的桑基图。
+    write_highlighted_patterns: true
+    # 加宽 strata（0-1）以缩小柱子之间的视觉间距。
+    stratum_width: 0.48
+    flow_alpha: 0.38
+    # highlighted 图中：非目标流弱化、目标趋势分支增强；可按需覆盖默认值。
+    background_flow_alpha: 0.22
+    highlight_flow_alpha: 0.88
+    highlight_color: "#F2A541"
+    # 高亮分支增加深色轮廓；细小趋势也更容易辨认，不改变柱高与流宽。
+    highlight_outline_color: "#F2A541"
+    highlight_outline_width: 0.55
+    background_flow_color: "grey85"
+    colors:
+      gene: {up: "#D95F59", stable: "#D9D9D9", down: "#3B6FB6"}
+      gsea: {positive: "#8E6CBE", stable: "#D9D9D9", negative: "#56A3A6"}
+    save: {width: 4, height: 6}
+    # 额外绘制原始 GSEA 受检通路全集的桑基图；不改变显著通路池的 trend 表、
+    # Excel、原有桑基图和高亮图。通路全集取各比较原始 @result 的并集；
+    # 当前比较未显著或未受检的通路统一显示为 NotSig，不单列 NotTested。
+    full_universe:
+      enabled: true
+      raw_gsea_dir: "data/enrichment_results"
+      # 默认继承上面的 variants/save，仅绘制总图；按需可开启高亮图。
+      write_highlighted_patterns: true
+      # variants: ["with_labels", "without_labels"]
+      # save: {width: 10, height: 7}

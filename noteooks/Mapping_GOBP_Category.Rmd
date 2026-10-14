@@ -1,0 +1,309 @@
+---
+title: "Mapping_GOBP_Category"
+output: html_document
+---
+
+# 0.加载已完成的GO通路映射表
+
+```{r}
+library(readr)
+library(dplyr)
+library(readxl)
+
+# 允许在项目根目录或 notebooks/ 目录中运行本 Rmd，不再写死具体项目的绝对路径。
+find_project_root <- function(start = getwd()) {
+  candidates <- unique(c(start, file.path(start, "..")))
+  candidates <- normalizePath(candidates, mustWork = FALSE)
+  found <- candidates[file.exists(file.path(candidates, "config.yml")) |
+                        file.exists(file.path(candidates, "config.example.yml"))]
+  if (!length(found)) stop("请从项目根目录或 notebooks/ 目录运行本 Rmd。", call. = FALSE)
+  normalizePath(found[[1]], mustWork = TRUE)
+}
+
+project_root <- find_project_root()
+config_file <- file.path(project_root, "config.yml")
+if (!file.exists(config_file)) stop("请先由 config.example.yml 创建并填写 config.yml。", call. = FALSE)
+config <- yaml::read_yaml(config_file)
+input_config <- config$input
+source(file.path(project_root, "src/00_utils.R"))
+
+category_index_table <- read_csv(
+  file.path(project_root, "src/gobp_category/GOBP_all_BP_classification_refined.csv"),
+  show_col_types = FALSE
+)
+```
+
+```{r}
+head(category_index_table)
+```
+
+## 简单统计GOBP映射表格分类情况
+
+```{r}
+category_relation <- category_index_table %>%
+  filter(
+    !is.na(Category),
+    !is.na(Category_Merged)
+  ) %>%
+  dplyr::count(Category, Category_Merged, name = "n_GO") %>%
+  arrange(Category_Merged, desc(n_GO))
+
+category_relation
+```
+
+```{r}
+library(tidyr)
+library(ggplot2)
+
+# 1. 统计实际存在的映射
+category_relation_raw <- category_index_table %>%
+  filter(
+    !is.na(Category),
+    !is.na(Category_Merged)
+  ) %>%
+  dplyr::count(Category, Category_Merged, name = "n_GO")
+
+
+# 2. 确定 Category 排序
+#    让属于同一个 Category_Merged 的 Category 尽量聚在一起
+category_order <- category_relation_raw %>%
+  group_by(Category) %>%
+  slice_max(n_GO, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(Category_Merged, desc(n_GO)) %>%
+  pull(Category)
+
+
+# 3. 补全所有 Category × Category_Merged 组合
+category_relation <- category_relation_raw %>%
+  complete(
+    Category,
+    Category_Merged,
+    fill = list(n_GO = 0)
+  ) %>%
+  mutate(
+    Category = factor(
+      Category,
+      levels = rev(category_order)
+    )
+  )
+
+
+# 不着色0的格子
+category_relation <- category_relation %>%
+  mutate(
+    n_GO_fill = ifelse(n_GO == 0, NA, n_GO)
+  )
+
+
+# 4. 绘图
+p1 <- ggplot(
+  category_relation,
+  aes(
+    x = Category_Merged,
+    y = Category
+  )
+) +
+  geom_tile(
+    aes(fill = n_GO_fill),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_text(
+    aes(
+      label = ifelse(n_GO == 0, "", n_GO)
+    ),
+    size = 3
+  ) +
+  scale_fill_viridis_c(
+    option = "C",
+    trans = "sqrt",
+    na.value = "white"
+  ) +
+  labs(
+    x = "Merged category",
+    y = "Original category",
+    fill = "GO terms"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    ),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
+# 1. 映射GSEA结果
+
+1.1 保存dataframe为映射做准备
+
+```{r}
+source(file.path(project_root, "scripts/F.load_pipeline_output_files.R"))
+
+comparison.df <- readr::read_tsv(
+  file.path(project_root, input_config$contrasts_file),
+  show_col_types = FALSE
+)
+
+enrichment <- read_enrichment_results(
+  comparison_df = comparison.df,
+  enrichment_dir = file.path(project_root, "data/enrichment_results")
+)
+
+gsea.df <- enrichment$gsea$df
+gsea_output_dir <- file.path(project_root, "table/enrichment_results")
+dir.create(gsea_output_dir, recursive = TRUE, showWarnings = FALSE)
+readr::write_csv(gsea.df, file.path(gsea_output_dir, "gsea_sig_group.merged.csv"))
+```
+
+```{r}
+# 首先检查GSEA富集到的通路是否都在category_index_table映射表格中，最好还是不直接使用映射好的结果，而是重新匹配分类规则
+category_index_table_filter <- category_index_table %>% filter(GO_Status == "Not marked obsolete")
+table(unique(gsea.df$ID) %in% category_index_table_filter$ID)
+table(unique(gsea.df$ID) %in% category_index_table$ID)
+```
+
+跳转到\`./src/\`下，运行05_run_category_gsea.py 以及 05_run_summary_gsea.sh
+
+```{r}
+# 读取分类后到GSEA结果
+gsea.category.df <- read_csv(
+  file.path(gsea_output_dir, "gsea_sig_group.merged.classified.csv"),
+  show_col_types = FALSE
+)
+gsea.category.df <- gsea.category.df[, !grepl("^(Unnamed: ?[0-9]*|\\.\\.\\.[0-9]+)$", names(gsea.category.df)), drop = FALSE]
+```
+
+```{r}
+# 读取GSEA的Summary的结果
+read_xlsx_as_list <- function(file) {
+  sheets <- readxl::excel_sheets(file)
+
+  result <- lapply(sheets, function(sheet) {
+    readxl::read_excel(file, sheet = sheet)
+  })
+
+  names(result) <- sheets
+
+  return(result)
+}
+
+```
+
+```{r}
+group_summary <- read_xlsx_as_list(file.path(gsea_output_dir, "gsea_sig_group.merged.summary.xlsx"))
+
+# 查看有哪些 sheets
+names(group_summary)
+
+# 提取某个 sheet
+group_summary$CQ
+# group_summary[["Sheet1"]]
+```
+
+```{r}
+comparison_cq_summary <- read_xlsx_as_list(file.path(
+  gsea_output_dir, "gsea_category_comparison_by_group", "GSEA_category_summary_CQ.xlsx"
+))
+names(comparison_cq_summary)
+
+comparison_cq_summary$R2_vs_R1_down
+```
+
+```{r}
+
+```
+
+# 2. 映射GSVA结果
+
+提取属于GSEA结果中的GSVA分数，并初步粗略的统计各类别下的趋势
+
+```{r}
+source(file.path(project_root, "src/gobp_trend/temporal_pathway_trend.R"))
+
+# 时间点由 metadata 中的 Cycle 列匹配，不再依赖样本名中的 _R0_、_R1_ 等模式。
+# 使用每个 Group 独立计算的 GSVA score；若某个 Group 缺文件会立即报错。
+metadata <- readr::read_tsv(
+  file.path(project_root, input_config$metadata_file),
+  show_col_types = FALSE
+)
+trend_config <- config$gobp_temporal_trend %||% list()
+group_ids <- sort(unique(gsea.category.df$Group))
+
+read_group_gsva <- function(group_id) {
+  score_path <- file.path(
+    project_root, "data/gsva/by_group", safe_path_component(group_id), "gsva_scores.rds"
+  )
+  if (!file.exists(score_path)) stop("找不到分组 GSVA 分数：", score_path, call. = FALSE)
+  readRDS(score_path)
+}
+
+run_group_temporal_trend <- function(group_id, thresholds) {
+  run_temporal_pathway_analysis(
+    score_matrix = read_group_gsva(group_id),
+    annotation = gsea.category.df,
+    group_name = group_id,
+    sample_metadata = metadata,
+    sample_column = input_config$sample_column,
+    group_column = input_config$group_column,
+    cycle_column = input_config$cycle_column,
+    cycle_order = trend_config$cycle_order %||% NULL,
+    zscore = trend_config$zscore %||% FALSE,
+    thresholds = thresholds
+  )
+}
+```
+
+```{r}
+# 探索版本：由当前数据的变化分布自动建议阈值。
+trend_auto <- setNames(
+  lapply(group_ids, run_group_temporal_trend, thresholds = list(mode = "auto")),
+  group_ids
+)
+
+# 例如查看 CQ；时间来源应显示为 metadata。
+trend_auto[[group_ids[[1]]]]$settings$time_source
+trend_auto[[group_ids[[1]]]]$settings$time_map
+trend_auto[[group_ids[[1]]]]$diagnostics
+```
+
+```{r}
+# 最终版本：参数写在 config.yml 的 gobp_temporal_trend.thresholds 中。
+# 默认示例的含义为：<0.10 的 pathway 变化、<0.07 的 CAS 变化不赋方向；
+# 总动态范围 <0.25 视为低动态；至少 60% 通路支持总体方向。
+final_thresholds <- trend_config$thresholds %||% list(
+  mode = "manual",
+  epsilon_pathway = 0.10,
+  epsilon_category = 0.07,
+  amplitude_cutoff = 0.25,
+  dcs_cutoff = 0.60
+)
+trend_final <- setNames(
+  lapply(group_ids, run_group_temporal_trend, thresholds = final_thresholds),
+  group_ids
+)
+
+trend_final[[group_ids[[1]]]]$summary
+trend_final[[group_ids[[1]]]]$CAS
+trend_final[[group_ids[[1]]]]$direction_metrics
+```
+
+```{r}
+# 保存完整对象及关键统计表，供后续解释和绘图使用。
+trend_output_dir <- file.path(gsea_output_dir, "gobp_temporal_trends")
+dir.create(trend_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+for (group_id in names(trend_final)) {
+  result <- trend_final[[group_id]]
+  group_dir <- file.path(trend_output_dir, safe_path_component(group_id))
+  dir.create(group_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(result, file.path(group_dir, "temporal_pathway_analysis.rds"))
+  readr::write_tsv(result$summary, file.path(group_dir, "category_trend_summary.tsv"))
+  readr::write_tsv(result$CAS, file.path(group_dir, "category_activity_score.tsv"))
+  readr::write_tsv(result$direction_metrics, file.path(group_dir, "direction_metrics.tsv"))
+  readr::write_tsv(result$pathway_trajectory, file.path(group_dir, "pathway_trajectory.tsv"))
+}
+```

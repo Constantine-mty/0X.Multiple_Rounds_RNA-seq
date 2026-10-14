@@ -1,0 +1,173 @@
+---
+title: "T-cell State GSVA（手动探索）"
+output: html_document
+---
+
+此 Notebook **不接入自动 Pipeline**。代码块默认 `eval=FALSE`，请逐块运行并调整基因集、基因 ID、过滤阈值及图形设置。单组雷达图使用该 Group 自身重新打分的 GSVA；跨组分面雷达图和状态轨迹图使用全样本统一打分。两种打分尺度不要直接比较绝对值。
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+## 1. 输入与基因集
+
+以下基因集是**可编辑的示意起点，不是最终生物学定义**。请根据项目、物种及 Gene ID 修改；基因名必须与 TPM 第一列一致。`coverage` 会展示匹配情况。
+
+```{r input}
+find_project_root <- function(start = getwd()) {
+  candidates <- normalizePath(c(start, file.path(start, "..")), mustWork = FALSE)
+  found <- candidates[file.exists(file.path(candidates, "config.yml")) |
+                      file.exists(file.path(candidates, "config.example.yml"))]
+  if (!length(found)) stop("请在项目根目录或 notebooks 目录运行。")
+  found[[1]]
+}
+project_root <- find_project_root()
+config_file <- file.path(project_root, "config.yml")
+if (!file.exists(config_file)) stop("请先创建 config.yml。")
+config <- yaml::read_yaml(config_file)
+
+# ggplot2_lib <- config$runtime$ggplot2_lib_loc
+# if (!is.null(ggplot2_lib) && nzchar(ggplot2_lib)) {
+#   desired <- normalizePath(file.path(ggplot2_lib, "ggplot2"), mustWork = TRUE)
+#   if ("ggplot2" %in% loadedNamespaces() &&
+#       normalizePath(getNamespaceInfo("ggplot2", "path")) != desired) {
+#     stop("当前 R 会话已加载其他 ggplot2；请重启 R 再运行此 Notebook。")
+#   }
+#   library(ggplot2, lib.loc = ggplot2_lib)
+# } else {
+#   library(ggplot2)
+# }
+source(file.path(project_root, "src/t_score/F.t_state_score.R"))
+
+input <- config$input
+metadata <- readr::read_tsv(file.path(project_root, input$metadata_file), show_col_types = FALSE)
+tpm <- t_score_read_tpm(file.path(project_root, config$gsva$tpm_file), input$gene_column)
+counts <- t_score_read_counts(file.path(project_root, input$counts_file), input$gene_column)
+
+gene_sets <- list(
+  Proliferation = c("MKI67", "TOP2A", "PCNA", "CDK1", "STMN1"),
+  Activation = c("CD69", "IL2RA", "ICOS", "TNFRSF4", "CD40LG"),
+  IFN_Response = c("ISG15", "IFIT1", "IFIT3", "MX1", "OAS1", "STAT1"),
+  Cytotoxicity = c("GZMB", "PRF1", "NKG7", "GNLY", "GZMA"),
+  Exhaustion = c("PDCD1", "LAG3", "HAVCR2", "TIGIT", "CTLA4", "TOX")
+)
+
+prepared <- t_score_prepare_input(
+  tpm, metadata, gene_sets,
+  groups = NULL,          # NULL = metadata 中全部 Group
+  cycle_order = NULL,     # NULL = metadata 中首次出现顺序；可填 c("R0", "R1", ...)
+  counts = counts, count_min = 10, count_min_samples = 3,
+  min_tpm = 0, min_samples = 1,
+  min_set_size = 2, max_set_size = 300,
+  sample_column = input$sample_column,
+  group_column = input$group_column,
+  cycle_column = input$cycle_column
+)
+prepared$coverage
+table(prepared$metadata[[input$group_column]], prepared$metadata[[input$cycle_column]])
+```
+
+## 2. 全样本及各 Group 独立打分
+
+这一步先用 counts（默认 `>10` 且至少 3 个样本）筛选基因，再使用 `log2(TPM + 1)` + Gaussian GSVA；预处理的基因集映射一致，但每组独立调用 GSVA。缺失某些 Cycle 的组可以正常运行，只要求每组至少两个样本。若不希望按 counts 过滤，可把上面的 `counts = counts` 改为 `counts = NULL`。
+
+```{r score}
+score_result <- t_score_run(prepared)
+dim(score_result$all_samples)
+lapply(score_result$by_group, dim)
+```
+
+## 3. 颜色与雷达样式设置
+
+下面只需修改两个具名向量，名称必须与 metadata 中的 Group / Cycle 对应；未指定的名称会自动补色。Group 颜色同时用于跨组雷达和轨迹图，Cycle 颜色用于单组雷达。
+
+```{r plot-settings}
+custom_group_colors <- c(CQ = "#4C78A8", N396 = "#F28E2B")
+custom_cycle_colors <- c(R0 = "#457B9D", R1 = "#E9C46A", R2 = "#F4A261", R3 = "#E76F51")
+
+resolve_colors <- function(levels, custom, palette = "Dark 3") {
+  colors <- setNames(grDevices::hcl.colors(length(levels), palette), levels)
+  if (length(custom)) {
+    if (is.null(names(custom)) || anyNA(names(custom)) || any(!nzchar(names(custom))) ||
+        anyDuplicated(names(custom))) stop("自定义颜色必须有唯一的 Group/Cycle 名称。")
+    unused <- setdiff(names(custom), levels)
+    if (length(unused)) warning("这些颜色名称不在当前数据中，将忽略：", paste(unused, collapse = ", "))
+    used <- intersect(levels, names(custom))
+    colors[used] <- custom[used]
+    tryCatch(grDevices::col2rgb(colors), error = function(e) stop("颜色值无效：", conditionMessage(e)))
+  }
+  colors
+}
+group_colors <- resolve_colors(score_result$group_order, custom_group_colors)
+cycle_colors <- resolve_colors(score_result$cycle_order, custom_cycle_colors)
+
+# 默认严格沿用参考代码中的 fmsb 雷达图（需安装 fmsb）；"polar" 是上一版 ggplot 极坐标样式。
+radar_style <- "reference"
+# 参考代码固定 -0.7 到 0.7。若分数超出此范围，请手动扩大；polar 可用 NULL 自动计算。
+radar_limits <- c(-1, 1)
+```
+
+## 4. 单组雷达：Cycle 为线
+
+```{r group-radar}
+group_radar <- setNames(lapply(score_result$group_order, function(group) {
+  t_score_plot_group_radar(score_result, group, cycle_colors = cycle_colors,
+                           style = radar_style, limits = radar_limits)
+}), score_result$group_order)
+```
+
+```{r}
+group_radar[[1]]
+group_radar[[2]]
+```
+
+## 5. 分面雷达：Cycle 为 facet、Group 为线
+
+```{r faceted-radar}
+p_facet_radar <- t_score_plot_faceted_radar(
+  score_result, group_colors = group_colors, style = radar_style, limits = radar_limits
+)
+p_facet_radar
+```
+
+## 6. 状态轨迹：每个指标一张小图
+
+横坐标严格来自 metadata 的 Cycle；缺失轮次不会补造样本。线与点为各组均值，浅色带为均值 ± SEM（也可选 `sd` 或 `none`），半透明点为单个样本。
+
+```{r trajectories}
+p_trajectories <- t_score_plot_trajectories(
+  score_result, ncol = 3, group_colors = group_colors,
+  error = "sem", show_samples = TRUE
+)
+p_trajectories
+```
+
+## 7. 确认后保存
+
+请先观察图形，按实际 Group/状态数量调整 PDF 尺寸，再运行本块。
+
+```{r save-scores-and-plots}
+output_dir <- file.path(project_root, "figures", "t_state_score")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+data_dir <- file.path(project_root, "data", "t_state_score")
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+saveRDS(score_result, file.path(data_dir, "t_state_scores.rds"))
+readr::write_tsv(t_score_long(score_result$all_samples, score_result),
+                 file.path(data_dir, "t_state_scores_all_samples.tsv"))
+for (group in names(score_result$by_group)) {
+  group_dir <- file.path(data_dir, "by_group", group)
+  dir.create(group_dir, recursive = TRUE, showWarnings = FALSE)
+  readr::write_tsv(t_score_long(score_result$by_group[[group]], score_result),
+                   file.path(group_dir, "t_state_scores.tsv"))
+}
+for (group in names(group_radar)) {
+  t_score_save_radar(group_radar[[group]],
+                     file.path(output_dir, paste0("radar_", group, ".pdf")),
+                     width = 7, height = 6)
+}
+t_score_save_radar(p_facet_radar,
+                   file.path(output_dir, "radar_by_cycle_all_samples.pdf"),
+                   width = 11, height = 8)
+ggplot2::ggsave(file.path(output_dir, "state_trajectories_all_samples.pdf"),
+                p_trajectories, width = 12, height = 8)
+```
